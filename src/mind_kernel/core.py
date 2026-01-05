@@ -1,43 +1,16 @@
-"""Core mind kernel loop for SUB-AGI.
-
-This module defines the MindKernel class that:
-- Holds the current MindState
-- Accepts user input as text
-- Produces a text response
-
-Initially this is intentionally simple and transparent. The goal is to
-have a minimal, inspectable "alive" loop that can later grow in
-complexity.
-"""
+"""Core mind kernel loop for SUB-AGI."""
 
 from __future__ import annotations
-
 from dataclasses import replace
-from typing import Tuple
+from typing import Tuple, Optional, Any
 
 from .mind_state import (
-    MindState,
-    Thought,
-    FocusItem,
-    EpisodicEpisode,
-    EpisodicEvent,
+    MindState, Thought, FocusItem, EpisodicEpisode, EpisodicEvent,
+    VisualObject, SemanticConcept
 )
 
-
 class MindKernel:
-    """Minimal SUB-AGI control loop.
-
-    Usage pattern (pseudo-code):
-
-        kernel = MindKernel()
-        while True:
-            user_text = input("You: ")
-            reply, state = kernel.step(user_text)
-            print("SUB-AGI:", reply)
-
-    The kernel always returns the latest MindState, so callers can
-    inspect or log the internal "mind" after each step.
-    """
+    """Minimal SUB-AGI control loop."""
 
     def __init__(self) -> None:
         self._state: MindState = MindState.new()
@@ -46,110 +19,92 @@ class MindKernel:
     def state(self) -> MindState:
         return self._state
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def step(self, user_input: str) -> Tuple[str, MindState]:
-        """Process one user input and return (reply_text, new_state).
-
-        For now, the behavior is deliberately simple:
-        - Update perception (raw_input, tokens)
-        - Push a thought into working memory
-        - Append an episodic memory event
-        - Generate a basic, honest reply
-        """
-        # Prepare next state (tick+1) while preserving continuity
+    def step(self, user_input: str, observation: Optional[Any] = None) -> Tuple[str, MindState]:
+        """Process input + observation -> reply + new_state."""
         next_state = self._state.clone_for_next_tick()
 
-        # 1) Update perception
-        tokens = user_input.strip().split()
+        # 1) Update perception (Text)
         next_state.perception.raw_input = user_input
-        next_state.perception.tokens = tokens
+        next_state.perception.tokens = user_input.strip().split()
 
-        # 2) Update working memory / attention
-        next_state.working_memory.attention.recent_inputs.append(user_input)
-        next_state.working_memory.attention.current_focus = "conversation"
+        # 2) Update perception (Visual)
+        # Assuming observation is a dict or object with 'visible_objects'
+        if observation and hasattr(observation, 'visible_objects'):
+            next_state.perception.visual_objects = []
+            for obj in observation.visible_objects:
+                # obj is dict from grid_world
+                next_state.perception.visual_objects.append(
+                    VisualObject(
+                        id=obj['id'],
+                        kind=obj['kind'],
+                        rel_position=obj['rel_position'],
+                        shape_pattern=obj.get('shape')
+                    )
+                )
 
+        # 3) Working Memory Update
         thought = Thought(
             id=f"thought-{next_state.meta.tick}",
-            content=f"User said: '{user_input}'",
+            content=f"Input: '{user_input}'. Visuals: {len(next_state.perception.visual_objects)} objects",
             strength=0.7,
         )
         next_state.working_memory.current_thoughts.append(thought)
-
-        if user_input:
-            next_state.working_memory.focus_stack.append(
-                FocusItem(type="conversation", value="respond_to_user")
-            )
-
-        # 3) Minimal episodic memory update (one episode for now)
+        
+        # 4) Episodic Memory (simplified)
         if not next_state.long_term_memory.episodic:
-            episode = EpisodicEpisode(
-                episode_id="episode-1",
-                time_start=next_state.time.created_at,
-                time_end=next_state.time.created_at,
-                summary="Initial interactions",
+            next_state.long_term_memory.episodic.append(
+                EpisodicEpisode("ep-1", next_state.time.created_at, next_state.time.created_at, "Start")
             )
-            next_state.long_term_memory.episodic.append(episode)
-
-        episode = next_state.long_term_memory.episodic[0]
-        event = EpisodicEvent(
-            t=next_state.meta.tick,
-            input=user_input,
-            internal_state_ref=next_state.meta.state_id,
-            emotional_valence=0.1,
-            emotional_arousal=0.3,
-        )
-        episode.events.append(event)
-        episode.time_end = next_state.time.last_updated_at
-
-        # 4) Dialogue context
-        next_state.dialog_context.last_user_utterance = user_input
-        next_state.dialog_context.history.append(
-            replace(
-                type(next_state.dialog_context.history[0]) if next_state.dialog_context.history else None,
-            )
-            if False
-            else None
+        next_state.long_term_memory.episodic[0].events.append(
+            EpisodicEvent(next_state.meta.tick, user_input, next_state.meta.state_id, 0.1, 0.3)
         )
 
-        # Generate a naive but honest reply
-        if not user_input.strip():
-            reply = "I did not hear anything. Can you say something?"
-            next_state.safety.flags.confused = True
-        else:
-            reply = self._generate_reply(next_state, user_input)
-            next_state.dialog_context.last_system_utterance = reply
-            next_state.dialog_context.history.append(
-                type("DialogTurn", (), {"speaker": "sub-agi", "text": reply})()
-            )
-
-        # Update internal state
+        # 5) Reasoning & Reply Generation
+        reply = self._generate_reply(next_state, user_input)
+        
         self._state = next_state
         return reply, self._state
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _generate_reply(self, state: MindState, user_input: str) -> str:
-        """Very simple reply strategy for the first prototype.
+        """Heuristic-based reply logic for Phase 1."""
+        text = user_input.lower().strip()
+        
+        # A) Symbol Grounding: User says "This is X" while looking at an object
+        if text.startswith("this is ") and len(text.split()) == 3:
+            label = text.split()[-1].upper() # Extract label "A"
+            # Look at visual objects
+            visible = state.perception.visual_objects
+            
+            # Heuristic: If exactly one salient object is visible, associate label with its shape
+            objects_with_shape = [o for o in visible if o.shape_pattern]
+            
+            if len(objects_with_shape) == 1:
+                obj = objects_with_shape[0]
+                # Store in Semantic Memory
+                concept = SemanticConcept(
+                    id=f"concept-{label}",
+                    type="letter_shape",
+                    symbol=label,
+                    shape_pattern=obj.shape_pattern
+                )
+                state.long_term_memory.semantic_concepts.append(concept)
+                return f"I see the shape. I will remember that this is '{label}'."
+            elif len(objects_with_shape) > 1:
+                return "I see multiple shapes. Which one is it?"
+            else:
+                return "I don't see any shape to learn."
 
-        Rules (temporary):
-        - If the user mentions a single uppercase letter, treat it as
-          an alphabet lesson.
-        - Otherwise, acknowledge and echo.
-        """
-        tokens = user_input.strip().split()
-        uppercase_letters = [t for t in tokens if len(t) == 1 and t.isalpha() and t.isupper()]
-
-        if len(uppercase_letters) == 1:
-            letter = uppercase_letters[0]
-            if letter not in state.perception.alphabet_focus.letters_seen:
-                state.perception.alphabet_focus.letters_seen.append(letter)
-            state.perception.alphabet_focus.current_letter_lesson = letter
-            return f"I see the letter '{letter}'. I am learning it."
-
-        # Fallback generic reply
-        return f"I am SUB-AGI and I heard you say: '{user_input}'."
+        # B) Recall: User asks "What is this?"
+        if "what is this" in text:
+            visible = state.perception.visual_objects
+            objects_with_shape = [o for o in visible if o.shape_pattern]
+            
+            if len(objects_with_shape) == 1:
+                target_shape = objects_with_shape[0].shape_pattern
+                # Search Semantic Memory
+                for concept in state.long_term_memory.semantic_concepts:
+                    if concept.shape_pattern == target_shape:
+                        return f"This looks like '{concept.symbol}'."
+                return "I see a shape, but I don't know what it is yet."
+            
+        return f"I am listening. (Visual objects: {len(state.perception.visual_objects)})"
