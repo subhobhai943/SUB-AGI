@@ -17,6 +17,7 @@ on:
         - environment_test
         - mind_kernel_test
         - phase1_test
+        - phase2_test
 
 jobs:
   run-sub-agi:
@@ -90,8 +91,13 @@ jobs:
       if: github.event.inputs.run_mode == 'phase1_test'
       run: |
         echo "=== Phase 1: Symbol Grounding Experiment ==="
-        # Run the experiment script and capture stderr to error.log on failure
         python src/experiments/phase1_grounding.py 2> error.log
+
+    - name: Run Phase 2 Curiosity Exploration
+      if: github.event.inputs.run_mode == 'phase2_test'
+      run: |
+        echo "=== Phase 2: Curiosity & Exploration Experiment ==="
+        python src/experiments/phase2_curiosity.py 2> error.log
         
     - name: Capture Failure Log
       if: failure()
